@@ -1,9 +1,9 @@
-// token-radar-01 entrypoint (radar-2) — Node 22, standard library only.
+// token-radar-01 entrypoint (radar-3) — Node 22, standard library only.
 //
 // What it does, in order:
 //   1. reads the sealed DefiLlama snapshot (default /input/snapshot.json,
 //      or --input <file|dir>), 2. scores every pre-token protocol with the
-//      comps-calibrated model in lib/model.ts, 3. writes the ranked board
+//      fitted curve in lib/model.ts, 3. writes the ranked board
 //      (board.json) and the dashboard's data (data.js), 4. copies this repo's
 //      dashboard/ and screenshots/ into the output, 5. writes dossier.json,
 //      the summary the judge reads, with the vendored make.fun library.

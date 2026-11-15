@@ -1,4 +1,4 @@
-/* Token Radar's theme, radar-2. One palette, one type scale, one spacing scale; every
+/* Token Radar's theme, radar-3. One palette, one type scale, one spacing scale; every
    component below is built from those tokens, so the board, the model panel and the
    detail drawer share the same hairlines, radii and steps. Nothing here fetches or
    imports anything: the dashboard is a static page. */
@@ -369,7 +369,7 @@ tbody tr[data-selected="true"] {
   color: var(--muted);
 }
 
-/* Model panel: the formula, the sandbox, the sector table. */
+/* Model panel: the formula, the backtest tables, the charts, the set-aside list. */
 .model {
   margin-top: var(--space-16);
   padding: var(--space-24);
@@ -383,21 +383,71 @@ tbody tr[data-selected="true"] {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
-.sandbox {
-  display: grid;
-  gap: var(--space-12);
-  padding: var(--space-16);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--canvas);
+.model h3 {
+  margin-top: var(--space-12);
 }
-.sandbox .field {
-  align-content: start;
+
+/* Verdict badges: green for a plan that nets out, amber for one that only beats the fees, red for one that does not. */
+.verdict {
+  display: inline-block;
+  padding: 2px var(--space-8);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
-.sandbox .field input[type="range"] {
-  min-width: 280px;
+.verdict.farm {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  color: var(--accent);
+}
+.verdict.thin {
+  background: #fdf3d7;
+  color: #8a6d1a;
+}
+.verdict.skip {
+  background: #fbe9e5;
+  color: var(--negative);
+}
+.band {
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--font-num);
+  white-space: nowrap;
+}
+
+/* Charts: inline SVG scatters, drawn from data.js, no image and no network. */
+.chart-wrap {
+  max-width: 640px;
+}
+.chart {
   width: 100%;
-  padding: 0;
+  height: auto;
+  display: block;
+}
+.chart .grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.chart .axis {
+  font-size: 11px;
+  fill: var(--muted);
+  font-family: var(--font-num);
+}
+.chart .dot {
+  fill: var(--muted);
+}
+.chart .dot.in {
+  fill: var(--accent);
+}
+.chart .fit {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.chart .band-line {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  opacity: 0.5;
 }
 
 /* Detail drawer: a fixed panel from the right, with its own sections. */
