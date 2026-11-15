@@ -59,6 +59,19 @@
   }
   function displayImplied(row) { return state.sandbox ? impliedOf(row, sandboxModel()) : row.implied_value_usd; }
 
+  // What the sandbox actually did to the board: the caption under the table names the
+  // re-ranked top row and whether it moved, so sliding a weight shows its consequence
+  // in one sentence instead of forcing a scan of the whole table.
+  function sandboxNote() {
+    if (!state.sandbox) return '';
+    var top = sortedRows(rows())[0];
+    if (!top) return ' Sandbox on: the board is re-ranked with your weights.';
+    var submitted = DATA.rows[0];
+    var where = ' The top row is now ' + top.name + ' at ' + fmtUsd(displayImplied(top));
+    if (submitted && top.slug !== submitted.slug) return ' Sandbox on: the board is re-ranked with your weights.' + where + ', not ' + submitted.name + ' at ' + fmtUsd(submitted.implied_value_usd) + '.';
+    return ' Sandbox on: the board is re-ranked with your weights.' + where + ', the same row the submitted board tops.';
+  }
+
   function el(tag, attrs) {
     var node = document.createElement(tag);
     if (attrs) {
@@ -327,7 +340,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its model and farm plan.' + (state.sandbox ? ' Sandbox on: the board is re-ranked with your weights.' : '') }),
+          el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its model and farm plan.' + sandboxNote() }),
           el('thead', null, el('tr', null,
             sortHeader('implied', 'Rank'),
             sortHeader('name', 'Protocol'),
