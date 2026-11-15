@@ -139,6 +139,36 @@
     if (c.indexOf('payment') >= 0) return 'Send $' + capital + ' through ' + name + ' on ' + chain + ' and keep the receipt in the farming wallet.';
     return 'Deposit $' + capital + ' of USDC into ' + name + ' on ' + chain + ' and keep the position open.';
   }
+  // One table drives the mechanism-aware farm steps, in the same branch order as the
+  // model: first matching category wins, the last row is the default. The strings are
+  // identical to the model's, so the page and the board agree by construction.
+  var MECH = [
+    [['risk curator', 'curator', 'allocator'], 'Check the vault\'s allocation weekly; rebalance only if the curator moved funds.', 'the vault accrues a full distribution cycle', 'Curator risk: a bad allocation or a compromised curator key can lose the deposit.'],
+    [['rwa'], 'Check the asset\'s yield and net asset value weekly; top up only if the yield fell.', 'at least one yield distribution lands', 'Issuer risk: the asset depends on the issuer\'s reserves and legal structure.'],
+    [['basis trading'], 'Check the funding rate and hedge weekly; exit if funding flipped negative.', 'the basis trade runs through a full funding cycle', 'Funding-rate risk: flipped funding eats the yield, and the hedge can break.'],
+    [['restak'], 'Claim restaking rewards weekly and restake them so the position compounds.', 'restaking rewards compound across epochs', 'Slashing risk: the receipt token can depeg and the validator can be slashed.'],
+    [['lend', 'cdp', 'collateral'], 'Repay and re-borrow a small amount weekly, keeping the health factor high.', 'the borrow accrues interest across snapshots', 'Liquidation risk: if the collateral falls, the position can be liquidated.'],
+    [['dex', 'leveraged farm'], 'Rebalance the range weekly if the price left it, and collect the fees earned.', 'it earns fees across more than one epoch', 'Impermanent loss: a big price move costs more than the fees earned.'],
+    [['yield', 'aggregator'], 'Check the vault\'s APY weekly; switch vaults only if it collapsed.', 'compounding runs through several harvests', 'Strategy risk: the vault\'s strategy can underperform, or the protocol can be exploited.'],
+    [['bridge'], 'Bridge a small amount back weekly to keep the route active on both sides.', 'the bridge counts activity in more than one window', 'Bridge risk: an exploit or a paused route can strand funds on the far chain.'],
+    [['staking', 'staking pool'], 'Claim staking rewards weekly and restake them so the position compounds.', 'rewards compound across epochs', 'Slashing risk: the validator can be slashed and the receipt token can depeg.'],
+    [['perpetual', 'derivative', 'options'], 'Close and reopen the hedge weekly to keep it delta-neutral.', 'it survives a full funding period', 'Liquidation and funding risk: leverage magnifies losses and funding bleeds margin.'],
+    [['prediction'], 'Settle open markets weekly and open one new position.', 'the market resolves after you entered', 'A market can resolve against you \u2014 never size one beyond what you can lose.'],
+    [['stable'], 'Check the peg and the latest reserve attestation weekly.', 'the stable asset holds its peg through a full cycle', 'Depeg risk: the stable asset can lose its peg if reserves or demand break.'],
+    [['insurance'], 'Check the policy still covers the position weekly.', 'the cover stays active through the risk window', 'Cover risk: a claim can be denied if the event falls outside the policy\'s terms.'],
+    [['chain'], 'Use one native app on {C} weekly so the chain counts the wallet as active.', 'the chain counts activity across epochs', 'Chain risk: a halted or exploited chain can strand funds.'],
+    [['payment'], 'Send one more payment through the route weekly.', 'the payment history spans more than one snapshot', 'Counterparty risk: the payment rail depends on its operator staying solvent.'],
+    [[], 'Make one qualifying action weekly, such as a deposit, a borrow, a swap or a vote.', 'the activity is counted in more than one snapshot', 'Smart-contract risk: the protocol can be exploited \u2014 never farm more than you can lose.']
+  ];
+  function mechFor(p, chain, hold) {
+    var c = (p.category || '').toLowerCase();
+    for (var i = 0; i < MECH.length; i++) {
+      var row = MECH[i], ok = row[0].length === 0;
+      for (var j = 0; j < row[0].length; j++) if (c.indexOf(row[0][j]) >= 0) { ok = true; break; }
+      if (ok) return { weekly: row[1].split('{C}').join(chain), hold: 'Hold the position for at least ' + hold + ' days so ' + row[2] + '.', risk: row[3] };
+    }
+    return { weekly: '', hold: '', risk: '' };
+  }
   function stepText(step) {
     var s = step.text + ' Cost: ' + step.cost + '. Time: ' + step.time + '.';
     if (s.length > 600) s = s.slice(0, 596) + '...';
@@ -149,15 +179,17 @@
     var econ = econOf(p, capital, share);
     var chain = econ.chain;
     var hold = econ.hold;
+    var mech = mechFor(p, chain, hold);
     var gas = feeFor(chain).gas_usd;
     var gasText = gas < 1 ? '$' + gas.toFixed(2) : '$' + gas;
     var minDeposit = econ.minDeposit === null ? 'no deposit up to $100,000 nets out' : 'smallest deposit that nets out: ' + money(econ.minDeposit);
     return [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
       { text: actionFor(p, capital, chain), cost: '$' + capital.toLocaleString('en-US') + ' of capital and about ' + gasText + ' of gas on ' + chain, time: '15 minutes to set up' },
-      { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about ' + gasText + ' of gas a week', time: '10 minutes a week' },
-      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital.toLocaleString('en-US') + ' stays in the position', time: hold + ' days' },
+      { text: mech.weekly, cost: 'about ' + gasText + ' of gas a week', time: '10 minutes a week' },
+      { text: mech.hold, cost: 'the $' + capital.toLocaleString('en-US') + ' stays in the position', time: hold + ' days' },
       { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
+      { text: mech.risk, cost: 'nothing to read, and it decides the size', time: '5 minutes' },
       { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' },
       { text: 'Net at ' + money(capital) + ' and a ' + (share * 100) + '% airdrop share: slice ' + money(econ.slice) + ' minus fees ' + money(econ.fees) + ' minus T-bill ' + money(econ.tbill) + ' is ' + money(econ.net) + ', so this plan is ' + econ.verdict + '. ' + minDeposit + '. Recompute it live in the dashboard at other sizes and shares.', cost: 'the ' + money(capital) + ' stays in the position', time: 'decide before you deposit' }
     ].map(stepText);
@@ -328,7 +360,7 @@
     verdictSelect.addEventListener('change', function () { state.verdict = verdictSelect.value; render(); });
     var watchBtn = el('button', { type: 'button', 'aria-pressed': state.watchOnly ? 'true' : 'false', text: state.watchOnly ? 'Watchlist only' : 'Watchlist + early', onclick: function () { state.watchOnly = !state.watchOnly; render(); } });
     var tabs = el('div', { class: 'tabs' },
-      [['pre-token', 'Pre-token'], ['live', 'Live token'], ['method', 'Method'], ['set-aside', 'Set aside']].map(function (t) {
+      [['pre-token', 'Pre-token'], ['live', 'Live token'], ['method', 'Method'], ['note', 'Research note'], ['set-aside', 'Set aside']].map(function (t) {
         return el('button', { type: 'button', 'aria-pressed': state.tab === t[0] ? 'true' : 'false', text: t[1], onclick: function () { state.tab = t[0]; render(); } });
       })
     );
@@ -342,7 +374,7 @@
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Scope' }), watchBtn),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'View' }), tabs),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Export' }), el('button', { class: 'button', type: 'button', text: 'Download CSV', title: 'Download the board as it is filtered and sorted right now, at the capital and share shown', onclick: function () { downloadCsv(); } })),
-      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows · ' + fmtUsd(filteredTotal()) + ' implied' : state.tab === 'live' ? DATA.live.length + ' live-token protocols' : state.tab === 'method' ? 'The curve, the backtest and the limits' : DATA.set_aside.length + ' protocols set aside, with the rule for each' })
+      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows · ' + fmtUsd(filteredTotal()) + ' implied' : state.tab === 'live' ? DATA.live.length + ' live-token protocols' : state.tab === 'method' ? 'The curve, the backtest and the limits' : state.tab === 'note' ? 'The board read back as research' : DATA.set_aside.length + ' protocols set aside, with the rule for each' })
     );
   }
 
@@ -482,6 +514,24 @@
     return svg;
   }
 
+  function notePanel() {
+    var paras = (DATA.research_note || []).map(function (t) { return el('p', { text: t }); });
+    var outRows = (DATA.outliers || []).map(function (o) {
+      return el('tr', null, el('td', null, el('b', { text: o.name })), el('td', null, el('span', { text: o.category })), el('td', { class: 'num', text: (o.residual >= 0 ? '+' : '') + o.residual.toFixed(2) }));
+    });
+    return el('section', { class: 'panel note' },
+      el('h2', { text: 'Research note' }),
+      el('p', { class: 'sub', text: 'The board read back in plain words. Every number here is computed from the fitted model and the ranked board \u2014 nothing is asserted from outside the snapshot.' }),
+      paras,
+      el('h3', { text: 'Set aside from the fit' }),
+      el('p', { class: 'sub', text: 'These traded tokens sit more than ~30x off the first-pass curve, so the robust fit leaves them out. They are listed, not hidden.' }),
+      el('div', { class: 'table-wrap' }, el('table', null,
+        el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Token' }), el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Log residual' }))),
+        el('tbody', null, outRows)
+      ))
+    );
+  }
+
   function methodPanel() {
     var bt = DATA.backtest;
     var curve = DATA.curve;
@@ -518,6 +568,8 @@
       el('p', { class: 'sub', text: 'The slope is below 1, so big protocols trade at far lower FDV/TVL than small ones: a protocol with ten times the TVL is worth about ' + Math.pow(10, curve.b).toFixed(1) + 'x, not 10x. A flat multiple cannot see that, and a per-category median hides it behind one noisy ratio. Each category then gets a family factor — its shrunk mean log-residual off the curve, capped to 0.5x–2.5x — and the protocol\u2019s TVL is carried two weeks ahead at its 7-day rate before it is priced. Seasoning runs x0.70 at launch to x1.15 at 18 months and x0.95 at 5 years. A watchlist sibling of a traded token is halved.' }),
       el('div', { class: 'chart-wrap', html: logChart(looPts, curveLine, 'TVL', 'Market cap', 'Traded tokens against the fitted curve') }),
       el('p', { class: 'sub', text: 'Traded tokens against the fitted curve, log-log. The line is the curve; the dots are the ' + curve.n + ' traded tokens it was fitted on.' }),
+      el('h3', { text: 'Robust fit' }),
+      el('p', { class: 'sub', text: 'The curve is fit on ' + curve.n + ' of ' + (curve.n + (DATA.outliers || []).length) + ' traded tokens. The rest sit more than ~30x off the first-pass line \u2014 a versioned duplicate, a dead token, a cap that has nothing to do with TVL \u2014 so the fit sets them aside instead of letting them bend it. They are listed by name in the Research note tab.' }),
       el('h3', { text: 'Leave-one-out, tested blind' }),
       el('div', { class: 'table-wrap' }, el('table', null,
         el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Measure' }), el('th', { scope: 'col', text: 'Curve' }), el('th', { scope: 'col', text: 'Flat multiple' }))),
@@ -690,6 +742,7 @@
     if (state.tab === 'pre-token') shell.appendChild(boardTable());
     else if (state.tab === 'live') shell.appendChild(liveTable());
     else if (state.tab === 'method') shell.appendChild(methodPanel());
+    else if (state.tab === 'note') shell.appendChild(notePanel());
     else shell.appendChild(setAsidePanel());
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');

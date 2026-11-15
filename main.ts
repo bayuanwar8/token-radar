@@ -1,4 +1,4 @@
-// token-radar-01 entrypoint (radar-3) — Node 22, standard library only.
+// token-radar-01 entrypoint (radar-4) — Node 22, standard library only.
 //
 // What it does, in order:
 //   1. reads the sealed DefiLlama snapshot (default /input/snapshot.json,

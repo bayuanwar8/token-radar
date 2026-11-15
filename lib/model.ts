@@ -1,4 +1,4 @@
-// The token radar's model, radar-3: a fitted curve, tested blind, with netted farm plans.
+// The token radar's model, radar-4: a fitted curve, tested blind, with netted farm plans.
 // One snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds
@@ -14,6 +14,12 @@
 //               log10(mcap) = a + b x log10(TVL / $100M). The slope b is below 1, so big
 //               protocols trade at far lower FDV/TVL than small ones — a flat multiple cannot
 //               see that, and a per-category median hides it behind one noisy ratio.
+//   fit       = the curve is fit ROBUSTLY: a first pass, then the comps whose caps sit more
+//               than ~30x off the line are set aside (a versioned duplicate whose token is
+//               shared with another pool, a bridge whose token is effectively dead, a
+//               prediction market whose cap has nothing to do with its TVL). They are still
+//               listed by name with their residuals — they just do not drag the line. The
+//               rule is re-applied inside every blind refit, so the backtest stays honest.
 //   family    = the category's mean log-residual off the curve, shrunk n/(n+20) and capped
 //               to a factor of [0.5, 2.5]. A category with no live comps takes a factor of 1.
 //   growth    = the protocol's TVL carried two weeks ahead at its 7-day rate, through the
@@ -32,11 +38,15 @@
 // program, and the dashboard shows it next to the same numbers for a single flat multiple,
 // so the judge can see what the curve buys.
 //
-// A farm plan prices one position, not a slogan: slice = capital / (TVL + capital) x airdrop
-// share x implied value; fees are the gas and bridge of the cheapest of the protocol's first
-// three chains, from one table; the T-bill is the 4% a year the capital gives up over the
-// hold. Net = slice - fees - T-bill. FARM beats all of it, THIN beats the fees only, SKIP
-// does not. The dashboard recomputes every verdict live at other capitals and shares.
+// A farm plan prices one position, not a slogan, and it follows the protocol's own
+// mechanism: the main action, the weekly action and the risk are all chosen by category,
+// so a lending farm, a liquidity farm and a restaking farm read differently. Slice =
+// capital / (TVL + capital) x airdrop share x implied value; fees are the gas and bridge
+// of the cheapest of the protocol's first three chains, from one table; the T-bill is the
+// 4% a year the capital gives up over the hold. Net = slice - fees - T-bill. FARM beats
+// all of it, THIN beats the fees only, SKIP does not. The dashboard recomputes every
+// verdict live at other capitals and shares, and it carries a research note that reads
+// the board back: the size effect, the top calls, the family premiums, and the limits.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -101,7 +111,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 1000;
@@ -283,6 +293,12 @@ export interface RadarData {
   live: LiveRow[];
   comps: FitPoint[];
   set_aside: SetAsideRow[];
+  /** Traded tokens the curve was fit on, after the robust trim (see fitSet). */
+  fit_comps: number;
+  /** Comps the robust fit set aside, with how far off the first-pass curve each sits. */
+  outliers: TrimmedComp[];
+  /** The research note: the board read back in plain words, computed from the fitted numbers. */
+  research_note: string[];
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -381,6 +397,41 @@ export function fitCurve(points: FitPoint[]): CurveFit {
 /** The curve's value at a TVL: 10^(a + b x log10(TVL / $100M)). */
 export function curveValue(curve: CurveFit, tvlUsd: number): number {
   return Math.pow(10, curve.a + curve.b * Math.log10(Math.max(1, tvlUsd) / 1e8));
+}
+
+/** How far off the curve a comp may sit before the robust fit sets it aside: 1.5 log10 units, about 30x. */
+export const TRIM_LOG_RESID = 1.5;
+
+/** One comp the robust fit sets aside, and how far its cap sits off the first-pass curve. */
+export interface TrimmedComp {
+  slug: string;
+  name: string;
+  category: string | null;
+  residual: number;
+}
+
+/**
+ * The comps the curve is fit on: a first-pass OLS, then the protocols whose caps sit more
+ * than ~30x off the line are set aside — a versioned duplicate whose token is shared with
+ * another pool, a bridge whose token is effectively dead, a prediction market whose cap
+ * has nothing to do with its TVL. They are still listed by name with their residuals (see
+ * `outliers` in the radar data); they just do not drag the line. Callers re-apply this
+ * inside every blind refit, so the backtest numbers stay honest.
+ */
+export function fitSet(points: FitPoint[]): { kept: FitPoint[]; trimmed: TrimmedComp[] } {
+  const curve = fitCurve(points);
+  const kept: FitPoint[] = [];
+  const trimmed: TrimmedComp[] = [];
+  for (const p of points) {
+    const residual = Math.log10(p.mcap_usd) - Math.log10(Math.max(1, curveValue(curve, p.tvl_usd)));
+    if (Math.abs(residual) > TRIM_LOG_RESID) {
+      trimmed.push({ slug: p.slug, name: p.name, category: p.category, residual: round4(residual) });
+    } else {
+      kept.push(p);
+    }
+  }
+  trimmed.sort((a, b) => Math.abs(b.residual) - Math.abs(a.residual));
+  return { kept, trimmed };
 }
 
 /**
@@ -553,27 +604,32 @@ export function backtest(
   const looPoints: { real_usd: number; pred_usd: number }[] = [];
   for (let i = 0; i < points.length; i++) {
     const rest = points.filter((_, j) => j !== i);
-    const curve = fitCurve(rest);
-    const families = familyFactors(rest, curve, model);
+    // The robust rule is re-applied to every refit: the held-out token never decides
+    // which of its peers count, and a peer that sits 30x off the line in this refit
+    // does not drag it either.
+    const { kept } = fitSet(rest);
+    const curve = fitCurve(kept);
+    const families = familyFactors(kept, curve, model);
     const p = points[i]!;
     const pred = predict(curve, families, p);
     looPoints.push({ real_usd: p.mcap_usd, pred_usd: Math.round(pred) });
     looMisses.push(Math.max(pred / p.mcap_usd, p.mcap_usd / pred));
     looResiduals.push(Math.log10(pred) - Math.log10(p.mcap_usd));
-    const restFlat = flatMultiple(rest);
+    const restFlat = flatMultiple(kept);
     const flatPred = restFlat * p.tvl_usd;
     looFlatMisses.push(Math.max(flatPred / p.mcap_usd, p.mcap_usd / flatPred));
     looGrowth.push(finite(p.change_7d, 0));
     looAge.push(Math.log10((p.age_days ?? model.unknown_age_days) + 1));
   }
-  const fitSet = points.filter((p) => {
+  const fitSetRaw = points.filter((p) => {
     const listed = (snapshot.protocols.find((q) => q.slug === p.slug)?.listed_at ?? null) as string | null;
     return listed !== null && listed < '2024-01-01';
   });
-  const testSet = points.filter((p) => !fitSet.includes(p));
-  const splitCurve = fitCurve(fitSet);
-  const splitFamilies = familyFactors(fitSet, splitCurve, model);
-  const splitFlat = flatMultiple(fitSet);
+  const testSet = points.filter((p) => !fitSetRaw.includes(p));
+  const { kept: splitKept } = fitSet(fitSetRaw);
+  const splitCurve = fitCurve(splitKept);
+  const splitFamilies = familyFactors(splitKept, splitCurve, model);
+  const splitFlat = flatMultiple(splitKept);
   const splitMisses: number[] = [];
   const splitFlatMisses: number[] = [];
   for (const p of testSet) {
@@ -593,7 +649,7 @@ export function backtest(
     loo_curve: summariseMisses(looMisses),
     loo_flat: summariseMisses(looFlatMisses),
     time_split: {
-      fit_n: fitSet.length,
+      fit_n: splitKept.length,
       test_n: testSet.length,
       curve: summariseMisses(splitMisses),
       flat: summariseMisses(splitFlatMisses),
@@ -734,8 +790,9 @@ export interface BoardSummary {
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const points = tradedPoints(snapshot);
-  const curve = fitCurve(points);
-  const families = familyFactors(points, curve, model);
+  const { kept } = fitSet(points);
+  const curve = fitCurve(kept);
+  const families = familyFactors(kept, curve, model);
   const tradedFirstWords = new Set(points.map((p) => firstWord(p.name)));
   const bt = backtest(snapshot, points, model);
   const flat = bt.flat_multiple;
@@ -867,6 +924,72 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
   return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open.`;
 }
 
+/** The category's weekly action: what the farmer does every week to stay counted. */
+function weeklyFor(p: SnapshotProtocol, chain: string): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (c.includes('risk curator') || c.includes('curator') || c.includes('allocator')) return `Check the vault's allocation weekly; rebalance only if the curator moved funds.`;
+  if (c.includes('rwa')) return `Check the asset's yield and net asset value weekly; top up only if the yield fell.`;
+  if (c.includes('basis trading')) return `Check the funding rate and hedge weekly; exit if funding flipped negative.`;
+  if (c.includes('restak')) return `Claim restaking rewards weekly and restake them so the position compounds.`;
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Repay and re-borrow a small amount weekly, keeping the health factor high.`;
+  if (c.includes('dex') || c.includes('leveraged farm')) return `Rebalance the range weekly if the price left it, and collect the fees earned.`;
+  if (c.includes('yield') || c.includes('aggregator')) return `Check the vault's APY weekly; switch vaults only if it collapsed.`;
+  if (c.includes('bridge')) return `Bridge a small amount back weekly to keep the route active on both sides.`;
+  if (c.includes('staking') || c.includes('staking pool')) return `Claim staking rewards weekly and restake them so the position compounds.`;
+  if (c.includes('perpetual') || c.includes('derivative') || c.includes('options')) return `Close and reopen the hedge weekly to keep it delta-neutral.`;
+  if (c.includes('prediction')) return `Settle open markets weekly and open one new position.`;
+  if (c.includes('stable')) return `Check the peg and the latest reserve attestation weekly.`;
+  if (c.includes('insurance')) return `Check the policy still covers the position weekly.`;
+  if (c.includes('chain')) return `Use one native app on ${chain} weekly so the chain counts the wallet as active.`;
+  if (c.includes('payment')) return `Send one more payment through the route weekly.`;
+  return `Make one qualifying action weekly, such as a deposit, a borrow, a swap or a vote.`;
+}
+
+/** The category's hold reason: why this mechanism needs the position to sit. */
+function holdFor(p: SnapshotProtocol, hold: number): string {
+  const c = (p.category ?? '').toLowerCase();
+  const reason = (() => {
+    if (c.includes('risk curator') || c.includes('curator') || c.includes('allocator')) return 'the vault accrues a full distribution cycle';
+    if (c.includes('rwa')) return 'at least one yield distribution lands';
+    if (c.includes('basis trading')) return 'the basis trade runs through a full funding cycle';
+    if (c.includes('restak')) return 'restaking rewards compound across epochs';
+    if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return 'the borrow accrues interest across snapshots';
+    if (c.includes('dex') || c.includes('leveraged farm')) return 'it earns fees across more than one epoch';
+    if (c.includes('yield') || c.includes('aggregator')) return 'compounding runs through several harvests';
+    if (c.includes('bridge')) return 'the bridge counts activity in more than one window';
+    if (c.includes('staking') || c.includes('staking pool')) return 'rewards compound across epochs';
+    if (c.includes('perpetual') || c.includes('derivative') || c.includes('options')) return 'it survives a full funding period';
+    if (c.includes('prediction')) return 'the market resolves after you entered';
+    if (c.includes('stable')) return 'the stable asset holds its peg through a full cycle';
+    if (c.includes('insurance')) return 'the cover stays active through the risk window';
+    if (c.includes('chain')) return 'the chain counts activity across epochs';
+    if (c.includes('payment')) return 'the payment history spans more than one snapshot';
+    return 'the activity is counted in more than one snapshot';
+  })();
+  return `Hold the position for at least ${hold} days so ${reason}.`;
+}
+
+/** The category's risk: what can go wrong with this mechanism, stated before the money goes in. */
+function riskFor(p: SnapshotProtocol): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (c.includes('risk curator') || c.includes('curator') || c.includes('allocator')) return `Curator risk: a bad allocation or a compromised curator key can lose the deposit.`;
+  if (c.includes('rwa')) return `Issuer risk: the asset depends on the issuer's reserves and legal structure.`;
+  if (c.includes('basis trading')) return `Funding-rate risk: flipped funding eats the yield, and the hedge can break.`;
+  if (c.includes('restak')) return `Slashing risk: the receipt token can depeg and the validator can be slashed.`;
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Liquidation risk: if the collateral falls, the position can be liquidated.`;
+  if (c.includes('dex') || c.includes('leveraged farm')) return `Impermanent loss: a big price move costs more than the fees earned.`;
+  if (c.includes('yield') || c.includes('aggregator')) return `Strategy risk: the vault's strategy can underperform, or the protocol can be exploited.`;
+  if (c.includes('bridge')) return `Bridge risk: an exploit or a paused route can strand funds on the far chain.`;
+  if (c.includes('staking') || c.includes('staking pool')) return `Slashing risk: the validator can be slashed and the receipt token can depeg.`;
+  if (c.includes('perpetual') || c.includes('derivative') || c.includes('options')) return `Liquidation and funding risk: leverage magnifies losses and funding bleeds margin.`;
+  if (c.includes('prediction')) return `A market can resolve against you \u2014 never size one beyond what you can lose.`;
+  if (c.includes('stable')) return `Depeg risk: the stable asset can lose its peg if reserves or demand break.`;
+  if (c.includes('insurance')) return `Cover risk: a claim can be denied if the event falls outside the policy's terms.`;
+  if (c.includes('chain')) return `Chain risk: a halted or exploited chain can strand funds.`;
+  if (c.includes('payment')) return `Counterparty risk: the payment rail depends on its operator staying solvent.`;
+  return `Smart-contract risk: the protocol can be exploited \u2014 never farm more than you can lose.`;
+}
+
 /** A dollar amount with two decimals, or a whole number when it is one. */
 function money(n: number): string {
   const sign = n < 0 ? '-' : '';
@@ -875,9 +998,11 @@ function money(n: number): string {
 }
 
 /**
- * A protocol's farm plan: seven steps, each an action with a cost and a time. The plan is
+ * A protocol's farm plan: eight steps, each an action with a cost and a time. The plan is
  * derived from the protocol's own record (category, chains, TVL, age), never from a hand-written
- * list of names. The last step nets the position: slice minus fees minus the T-bill, with the
+ * list of names. The main action, the weekly action, the hold reason and the risk all follow
+ * the protocol's mechanism, so a lending farm, a liquidity farm and a restaking farm read
+ * differently. The last step nets the position: slice minus fees minus the T-bill, with the
  * verdict and the smallest deposit that nets out.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null, econ: FarmEcon): FarmStep[] {
@@ -900,12 +1025,12 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, econ: FarmEco
       time: '15 minutes to set up',
     },
     {
-      text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`,
+      text: weeklyFor(p, chain),
       cost: `about ${gasText} of gas a week`,
       time: '10 minutes a week',
     },
     {
-      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
+      text: holdFor(p, hold),
       cost: `the $${capital.toLocaleString('en-US')} stays in the position`,
       time: `${hold} days`,
     },
@@ -913,6 +1038,11 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, econ: FarmEco
       text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`,
       cost: 'no fee to check, and never pay to claim',
       time: '10 minutes',
+    },
+    {
+      text: riskFor(p),
+      cost: 'nothing to read, and it decides the size',
+      time: '5 minutes',
     },
     {
       text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
@@ -972,13 +1102,61 @@ export function radarRow(row: BoardRow): RadarRow {
   };
 }
 
+/** A dollar amount for the research note: $85.0M, $3.2M, $410K. */
+function noteUsd(n: number): string {
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `$${Math.round(n / 1e3)}K`;
+  return `$${Math.round(n)}`;
+}
+
+/**
+ * The research note: the board read back in plain words, every number computed from the
+ * fitted model and the ranked board. No claim about a protocol comes from outside the
+ * snapshot — the note names the top rows, the family premiums, the blind test and the
+ * limits, so the dashboard reads as research, not as a table with a formula attached.
+ */
+export function researchNote(
+  board: BoardRow[],
+  curve: CurveFit,
+  familyTable: { category: string; factor: number; comps: number }[],
+  bt: Backtest,
+  verdicts: { FARM: number; THIN: number; SKIP: number },
+  outliers: TrimmedComp[],
+  concentrationTop3: number,
+  totalImplied: number,
+): string[] {
+  const top = board.slice(0, 3);
+  const topLines = top
+    .map((r, i) => {
+      const m = r.model;
+      return `${i + 1}. ${r.name} — ${noteUsd(r.implied_value_usd)} implied on ${noteUsd(r.tvl_usd)} of TVL (${r.category ?? 'Other'}): family ${m.family_factor.toFixed(2)}x on ${m.family_comps} live comps, TVL carried ${m.growth_pct >= 0 ? '+' : ''}${m.growth_pct.toFixed(1)}% over two weeks, seasoning ${m.seasoning_multiplier.toFixed(2)}x at ${m.age_days ?? 365} days.`;
+    })
+    .join(' ');
+  const premium = familyTable[0];
+  const discount = familyTable[familyTable.length - 1];
+  const outlierNames =
+    outliers.length === 0
+      ? 'none'
+      : outliers.map((o) => `${o.name} (${o.residual >= 0 ? '+' : ''}${o.residual.toFixed(2)} log off the line)`).join(', ');
+  return [
+    `Size is the whole story, and it is not linear. The fitted curve is log10(mcap) = ${curve.a.toFixed(3)} + ${curve.b.toFixed(3)} x log10(TVL / $100M) on ${curve.n} traded tokens, so a protocol with ten times the TVL is worth about ${Math.pow(10, curve.b).toFixed(1)}x, not 10x. A flat FDV/TVL multiple — the median across the same comps — misses the real caps by x${bt.loo_flat.median_miss.toFixed(2)} blind; the curve misses by x${bt.loo_curve.median_miss.toFixed(2)}. That gap is the radar: the board's order comes from size first, and everything else is an adjustment to it.`,
+    `The top of the board is the size effect doing its work. ${topLines} Together the top 3 hold ${concentrationTop3}% of the board's ${noteUsd(totalImplied)} total implied value, which is what a power law does — the head is heavy and the tail is where the early radar earns its keep.`,
+    `Categories do not trade alike. The richest family is ${premium?.category ?? '—'} at ${premium?.factor.toFixed(2) ?? '—'}x on ${premium?.comps ?? 0} live comps; the cheapest is ${discount?.category ?? '—'} at ${discount?.factor.toFixed(2) ?? '—'}x on ${discount?.comps ?? 0}. Those factors are shrunk means of each category's log-residual off the curve, capped at 0.5x–2.5x, so a thin category cannot set its own price — and a category with no live comps at all takes a factor of 1, which is the model saying it does not know.`,
+    `The curve was tested before it priced anything. Leave-one-out over all ${bt.loo_points.length} traded tokens: median miss x${bt.loo_curve.median_miss.toFixed(2)}, ${bt.loo_curve.within3_pct}% of real caps within 3x, ${bt.loo_curve.within10_pct}% within 10x. Fit on the ${bt.time_split.fit_n} tokens listed before 2024 and tested on the ${bt.time_split.test_n} newer ones: median miss x${bt.time_split.curve.median_miss.toFixed(2)} against x${bt.time_split.flat.median_miss.toFixed(2)} for the flat multiple. The fit is robust: ${outliers.length} comps sit more than ~30x off the first-pass line and are set aside from the fit, not hidden — ${outlierNames}. They are the protocols a size curve cannot price: a versioned duplicate, a dead token, a cap that has nothing to do with TVL.`,
+    `Farming follows the same arithmetic. At $1,000 of capital and a 10% airdrop share, ${verdicts.FARM} of the ${board.length} rows net out (FARM), ${verdicts.THIN} cover their fees only (THIN), and ${verdicts.SKIP} do not cover either (SKIP). The pattern is the dilution: a slice is capital / (TVL + capital) times the share times the implied value, so the biggest names — the ones the board ranks highest — are the worst farms at small size, and the tail is where a $1,000 position can still net out. Every verdict recomputes live in the dashboard at other capitals and shares.`,
+    `Limits, stated plainly. One day of data: the snapshot is a single DefiLlama pull, and a protocol can launch, die or pivot after it. The curve cannot see tokenomics, revenue, team, or narrative — the four things that move a launch price most — so every implied value is a ranking input, not a price, and every band is an order of magnitude wide because the market disagrees with itself by that much inside a category. Use the board to choose where to look, not what something is worth.`,
+  ];
+}
+
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const points = tradedPoints(snapshot);
-  const curve = fitCurve(points);
-  const families = familyFactors(points, curve, model);
+  const { kept, trimmed } = fitSet(points);
+  const curve = fitCurve(kept);
+  const families = familyFactors(kept, curve, model);
   const bt = backtest(snapshot, points, model);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const familyTable = [...families.entries()]
@@ -1025,8 +1203,11 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     watchlist: snapshot.watchlist,
     rows: board.map(radarRow),
     live,
-    comps: points,
+    comps: kept,
     set_aside: setAside(snapshot, boardSlugs),
+    fit_comps: kept.length,
+    outliers: trimmed,
+    research_note: researchNote(board, curve, familyTable, bt, verdicts, trimmed, concentrationTop3, totalImplied),
   };
   return { board, radar };
 }
