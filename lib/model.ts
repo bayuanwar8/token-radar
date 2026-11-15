@@ -162,6 +162,12 @@ export interface RadarData {
   live_size: number;
   sector_multiples: Record<string, { multiple: number; comps: number }>;
   global_multiple: number;
+  /** Share of the board's total implied value held by its top 3 rows, in per cent. */
+  concentration_top3_pct: number;
+  /** Total implied value across the whole board, in USD. */
+  total_implied_usd: number;
+  /** Board rows per category, by total implied value, strongest first. */
+  category_rows: { category: string; rows: number; total_implied_usd: number }[];
   watchlist: string[];
   rows: RadarRow[];
   live: LiveRow[];
@@ -496,6 +502,23 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const sectorTable: Record<string, { multiple: number; comps: number }> = {};
   for (const [cat, v] of sectors.byCategory) sectorTable[cat] = v;
+  // Concentration: how much of the board's implied value the top 3 rows hold, and how the
+  // board splits across categories. Both come straight from the ranked board, so the page
+  // states them without re-deriving anything the model did not already compute.
+  const totalImplied = board.reduce((sum, r) => sum + r.implied_value_usd, 0);
+  const top3Implied = board.slice(0, 3).reduce((sum, r) => sum + r.implied_value_usd, 0);
+  const concentrationTop3 = totalImplied > 0 ? Math.round((top3Implied / totalImplied) * 1000) / 10 : 0;
+  const perCategory = new Map<string, { rows: number; total: number }>();
+  for (const r of board) {
+    const key = r.category ?? 'Other';
+    const entry = perCategory.get(key) ?? { rows: 0, total: 0 };
+    entry.rows += 1;
+    entry.total += r.implied_value_usd;
+    perCategory.set(key, entry);
+  }
+  const categoryRows = [...perCategory.entries()]
+    .map(([category, v]) => ({ category, rows: v.rows, total_implied_usd: v.total }))
+    .sort((a, b) => b.total_implied_usd - a.total_implied_usd || b.rows - a.rows);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -508,6 +531,9 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_size: live.length,
     sector_multiples: sectorTable,
     global_multiple: sectors.global,
+    concentration_top3_pct: concentrationTop3,
+    total_implied_usd: totalImplied,
+    category_rows: categoryRows,
     watchlist: snapshot.watchlist,
     rows: board.map(radarRow),
     live,

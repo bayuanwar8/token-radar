@@ -186,6 +186,41 @@
     });
   }
 
+  // The board's filtered total, in the sandbox's weights when the sandbox is on: the count
+  // line under the controls shows it, so a filtered view always states what it is worth.
+  function filteredTotal() {
+    return rows().reduce(function (sum, r) { return sum + displayImplied(r); }, 0);
+  }
+
+  // Export the board as it is filtered and sorted right now: rank, name, category, chains,
+  // TVL, seven-day growth, age, sector multiple and implied value, one row per line. The file
+  // is built in the page from the same rows the table shows, so the download and the board agree.
+  function csvCell(value) {
+    var s = value === null || value === undefined ? '' : String(value);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function downloadCsv() {
+    var list = sortedRows(rows());
+    var lines = ['rank,name,slug,category,chains,tvl_usd,change_7d_pct,age_days,sector_multiple,implied_value_usd'];
+    list.forEach(function (r) {
+      lines.push([
+        r.rank, csvCell(r.name), csvCell(r.slug), csvCell(r.category || 'Other'),
+        csvCell((r.chains || []).join(';')), r.tvl_usd,
+        r.change_7d === null ? '' : r.change_7d, r.age_days === null ? '' : r.age_days,
+        r.sector_multiple, displayImplied(r)
+      ].join(','));
+    });
+    var blob = new Blob([lines.join('\n') + '\n'], { type: 'text/csv;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'token-radar-board.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
   function header() {
     return el('header', { class: 'top' },
       el('div', { class: 'brand' }, el('span', { class: 'mark' }), el('span', { class: 'brand-name', text: 'Token Radar' })),
@@ -238,7 +273,8 @@
       el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chainSelect),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Scope' }), watchBtn),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
-      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
+      el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Export' }), el('button', { class: 'button', type: 'button', text: 'Download CSV', title: 'Download the board as it is filtered and sorted right now', onclick: function () { downloadCsv(); } })),
+      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows · ' + fmtUsd(filteredTotal()) + ' implied' : DATA.live.length + ' live-token protocols' })
     );
   }
 
@@ -378,6 +414,13 @@
         'implied = round( tvl_usd x sector_multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
       ),
       el('p', { class: 'sub', text: 'sector_multiple is the category\u2019s median FDV/TVL across the snapshot\u2019s own live-token protocols, winsorised to ' + m.multiple_floor + 'x\u2013' + m.multiple_cap + 'x and shrunk toward the global ' + fmtMult(DATA.global_multiple) + ' when a category has few comps. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown.' }),
+      el('h3', { text: 'Where the implied value sits' }),
+      el('p', { class: 'sub', text: 'The board is top-heavy by construction: a few very large TVL protocols carry most of the implied value, while the long tail is where the early radar earns its keep. The top 3 rows hold ' + DATA.concentration_top3_pct + '% of the board\u2019s ' + fmtUsd(DATA.total_implied_usd) + ' total implied value, and the five categories below hold the most of it.' }),
+      el('div', { class: 'facts' }, (DATA.category_rows || []).slice(0, 5).map(function (c) {
+        return el('div', { class: 'fact' }, el('span', { text: c.category + ' · ' + c.rows + ' rows' }), el('b', { text: fmtUsd(c.total_implied_usd) }));
+      })),
+      el('h3', { text: 'Reading the board' }),
+      el('p', { class: 'sub', text: 'Sort by any column to re-order the ranking; filter by category or chain, or search a name, to narrow it. Press / anywhere to jump to the search box. The Download CSV button exports exactly the rows you see, in the order you sorted them. Open a row to check the model\u2019s arithmetic for that protocol and to read its farm plan, and use Copy farm plan to take the six steps with you. In the sandbox, move the growth weight or the maturity floor and the whole board re-ranks from the same function, so you can see which rows depend on growth and which on age.' }),
       el('div', { class: 'sandbox' },
         el('h3', { text: 'Model sandbox' }),
         el('p', { class: 'sub', text: 'Move the weights and the board re-ranks live, from the same impliedValue() function. The submitted board uses the default weights.' }),
@@ -431,6 +474,17 @@
         return el('li', null, el('b', { text: action }), el('span', { class: 'cost', text: tail }));
       }))
     ));
+    // Take the six steps with you: the button copies the plan as plain text, with the
+    // protocol's name and rank on the first line, so it pastes cleanly into a farm log.
+    var copyBtn = el('button', { class: 'button', type: 'button', text: 'Copy farm plan', onclick: function () {
+      var text = row.name + ' farm plan (rank ' + row.rank + ' of ' + DATA.board_size + '):\n' + steps.map(function (s, i) { return (i + 1) + '. ' + s; }).join('\n');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { copyBtn.textContent = 'Copied to clipboard'; }, function () { copyBtn.textContent = 'Copy failed, select the steps instead'; });
+      } else {
+        copyBtn.textContent = 'Copy is not supported in this browser';
+      }
+    } });
+    dialog.appendChild(el('section', { class: 'detail-section' }, copyBtn));
     if (typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();
     } else {
@@ -456,5 +510,11 @@
   render();
   window.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && dialog.open) dialog.close();
+    // Press / anywhere to jump to the search box, the way a command palette opens; never
+    // while the user is already typing in a field.
+    if (e.key === '/' && document.activeElement && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT' && document.activeElement.tagName !== 'TEXTAREA') {
+      var q = document.getElementById('q');
+      if (q) { e.preventDefault(); q.focus(); }
+    }
   });
 })();
